@@ -1,0 +1,369 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+import requests
+from bs4 import BeautifulSoup
+import re
+import pandas as pd
+from datetime import datetime
+import threading
+import time
+import json
+
+class SportsmansGuideScraperApp:
+    def __init__(self, master):
+        self.master = master
+        self.master.title("Sportsman's Guide Price and Stock Checker")
+        self.master.geometry("1100x800")
+        self.master.configure(bg="#ECEFF1")
+        self.current_theme = "light"
+        self.results_data = []
+        self.comparison_file_path = None
+
+        # --- Frames Layout ---
+        self.input_frame = tk.Frame(self.master, bg="#FFFFFF", bd=2, relief="groove", padx=15, pady=15)
+        self.input_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+
+        self.button_frame = tk.Frame(self.master, bg="#ECEFF1", padx=10, pady=5)
+        self.button_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        self.status_frame = tk.Frame(self.master, bg="#ECEFF1", padx=10, pady=5)
+        self.status_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        self.log_results_frame = tk.Frame(self.master, bg="#ECEFF1")
+        self.log_results_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.save_button_frame = tk.Frame(self.master, bg="#ECEFF1", padx=10, pady=5)
+        self.save_button_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
+
+        # --- Input Frame Widgets ---
+        tk.Label(self.input_frame, text="Proxy (e.g., http://proxy:port, optional):", font=("Helvetica", 12, "bold"), bg="#FFFFFF", fg="#37474F").pack(anchor="w")
+        self.proxy_entry = tk.Entry(self.input_frame, width=80, font=("Helvetica", 10), bd=2, relief="solid", bg="#FFFFFF", fg="#212121")
+        self.proxy_entry.pack(pady=(5, 10), fill="x")
+
+        tk.Label(self.input_frame, text="Enter Sportsman's Guide Product Links (one per line):", font=("Helvetica", 12, "bold"), bg="#FFFFFF", fg="#37474F").pack(anchor="w")
+        self.links_text = scrolledtext.ScrolledText(self.input_frame, height=8, width=80, font=("Helvetica", 10), bd=2, relief="solid", bg="#FFFFFF", fg="#212121")
+        self.links_text.pack(pady=(5, 10), fill="x")
+
+        # --- Button Frame Widgets ---
+        button_style = {
+            "font": ("Helvetica", 10, "bold"),
+            "relief": "raised",
+            "bd": 3,
+            "cursor": "hand2",
+            "activebackground": "#B0BEC5",
+            "width": 20,
+            "height": 2
+        }
+
+        self.check_button = tk.Button(self.button_frame, text="Check Prices & Stock", command=self.start_check_prices, bg="#4CAF50", fg="white", **button_style)
+        self.check_button.pack(side=tk.LEFT, padx=5)
+
+        self.compare_button = tk.Button(self.button_frame, text="Compare Price & Stock", command=self.start_compare_prices, bg="#FF9800", fg="white", **button_style, state=tk.DISABLED)
+        self.compare_button.pack(side=tk.LEFT, padx=5)
+
+        self.upload_button = tk.Button(self.button_frame, text="Upload Excel for Comparison", command=self.upload_excel_file, bg="#2196F3", fg="white", **button_style)
+        self.upload_button.pack(side=tk.LEFT, padx=5)
+
+        self.theme_button = tk.Button(self.button_frame, text="Switch to Dark Theme", command=self.toggle_theme, bg="#B0BEC5", fg="#212121", **button_style)
+        self.theme_button.pack(side=tk.LEFT, padx=5)
+
+        # --- Status Frame Widgets ---
+        self.vpn_status_label = tk.Label(self.status_frame, text="Checking VPN status...", font=("Helvetica", 10, "italic"), bg="#ECEFF1", fg="#546E7A")
+        self.vpn_status_label.pack(side=tk.LEFT, padx=(0, 10))
+        threading.Thread(target=self.check_vpn_status, daemon=True).start()
+
+        self.status_label = tk.Label(self.status_frame, text="Ready", font=("Helvetica", 10, "italic"), bg="#ECEFF1", fg="#546E7A")
+        self.status_label.pack(side=tk.LEFT)
+
+        self.progress_bar = ttk.Progressbar(self.status_frame, orient="horizontal", length=400, mode="determinate")
+        self.progress_bar.pack(side=tk.RIGHT)
+
+        # --- Log and Results Frame Widgets ---
+        self.log_pane = scrolledtext.ScrolledText(self.log_results_frame, wrap=tk.WORD, width=50, height=20, font=("Courier New", 9), bg="#F0F0F0", fg="#333333", bd=1, relief="solid")
+        self.log_pane.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        self.log_pane.insert(tk.END, "Progress Log:\n")
+        self.log_pane.config(state=tk.DISABLED)
+
+        self.result_text = scrolledtext.ScrolledText(self.log_results_frame, wrap=tk.WORD, width=50, height=20, font=("Courier New", 9), bg="#F0F0F0", fg="#000000", bd=1, relief="solid")
+        self.result_text.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        self.result_text.insert(tk.END, "Results:\n")
+        self.result_text.config(state=tk.DISABLED)
+
+        # --- Save Button Frame Widget ---
+        self.save_button = tk.Button(self.save_button_frame, text="Save to Excel", command=self.save_to_xls, font=("Helvetica", 10, "bold"), bg="#607D8B", fg="white", activebackground="#4c636f", padx=10, pady=5, relief="raised", bd=3, cursor="hand2", state=tk.DISABLED)
+        self.save_button.pack(pady=5)
+
+    def check_vpn_status(self):
+        """Checks if the PC is connected to a US-based VPN using ipapi.co."""
+        try:
+            response = requests.get("https://ipapi.co/json/", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            country = data.get("country_name", "Unknown")
+            if country == "United States":
+                self.vpn_status_label.config(text="Connected to US VPN", fg="#4CAF50")
+            else:
+                self.vpn_status_label.config(text=f"No US VPN detected (Country: {country})", fg="#D32F2F")
+        except Exception as e:
+            self.vpn_status_label.config(text=f"VPN check failed: {str(e)}", fg="#D32F2F")
+        self.master.update_idletasks()
+
+    def log_message(self, message):
+        """Appends a message to the log pane."""
+        self.log_pane.config(state=tk.NORMAL)
+        self.log_pane.insert(tk.END, f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {message}\n")
+        self.log_pane.see(tk.END)
+        self.log_pane.config(state=tk.DISABLED)
+        self.master.update_idletasks()
+
+    def display_results(self, results, changes=None):
+        """Displays results in the results pane."""
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete("1.0", tk.END)
+        if changes:
+            header = f"{'Link':<60} | {'Title':<50} | {'Old Price':<10} | {'New Price':<10} | {'Old Stock':<10} | {'New Stock':<10} | {'Changes':<30} | {'Date Checked':<20}\n"
+            self.result_text.insert(tk.END, header)
+            self.result_text.insert(tk.END, "-" * 190 + "\n")
+            for res, change in zip(results, changes):
+                line = f"{res['Link'][:58]:<60} | {res['Title'][:48]:<50} | {res.get('Old Price', 'N/A'):<10} | {res['Member Price']:<10} | {res.get('Old Stock', 'N/A'):<10} | {res['Stock']:<10} | {change[:28]:<30} | {res['Date Checked']:<20}\n"
+                self.result_text.insert(tk.END, line)
+        else:
+            header = f"{'Link':<60} | {'Title':<50} | {'Member Price':<12} | {'Stock':<10} | {'Date Checked':<20}\n"
+            self.result_text.insert(tk.END, header)
+            self.result_text.insert(tk.END, "-" * 160 + "\n")
+            for res in results:
+                line = f"{res['Link'][:58]:<60} | {res['Title'][:48]:<50} | {res['Member Price']:<12} | {res['Stock']:<10} | {res['Date Checked']:<20}\n"
+                self.result_text.insert(tk.END, line)
+        self.result_text.config(state=tk.DISABLED)
+
+    def fetch_product_info(self, url, proxy=None):
+        """Fetches product info from Sportsman's Guide."""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        try:
+            response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Extract title
+            title_tag = soup.find('h1', class_='product-title') or soup.find('h1')
+            title = title_tag.text.strip() if title_tag else "Unknown Title"
+
+            # Extract member price
+            price_container = soup.find('span', class_='price') or soup.find('div', class_='price-container')
+            if price_container:
+                price_text = price_container.text
+                price_match = re.search(r'\$(\d+\.\d{2})\s*Member', price_text, re.IGNORECASE)
+                member_price = price_match.group(1) if price_match else price_text.strip()
+            else:
+                price_match = re.search(r'\$(\d+\.\d{2})\s*Member', soup.text, re.IGNORECASE)
+                member_price = price_match.group(1) if price_match else "Price Not Found"
+
+            # Check stock
+            stock_message = soup.find(text=re.compile('Item currently sold out', re.IGNORECASE))
+            stock = "OOS" if stock_message else "In Stock"
+
+            return {
+                'Link': url,
+                'Title': title,
+                'Member Price': f"${member_price}",
+                'Stock': stock,
+                'Date Checked': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                return {
+                    'Link': url,
+                    'Title': "Error: 403 Forbidden - Use a US-based proxy or VPN",
+                    'Member Price': "Error",
+                    'Stock': "Error",
+                    'Date Checked': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+            return {
+                'Link': url,
+                'Title': f"Error: {str(e)}",
+                'Member Price': "Error",
+                'Stock': "Error",
+                'Date Checked': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        except Exception as e:
+            return {
+                'Link': url,
+                'Title': f"Error: {str(e)}",
+                'Member Price': "Error",
+                'Stock': "Error",
+                'Date Checked': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+    def start_check_prices(self):
+        """Starts price and stock checking in a new thread."""
+        self.status_label.config(text="Checking prices and stock...", fg="#FF9800")
+        self.progress_bar.start()
+        links = self.links_text.get("1.0", tk.END).strip().split('\n')
+        proxy = self.proxy_entry.get().strip() or None
+        if not any(link.strip() for link in links):
+            messagebox.showwarning("Warning", "Please enter at least one valid link!")
+            self.status_label.config(text="No links provided.", fg="#D32F2F")
+            self.progress_bar.stop()
+            return
+        threading.Thread(target=self.process_urls, args=(links, None, proxy), daemon=True).start()
+
+    def start_compare_prices(self):
+        """Starts price and stock comparison in a new thread."""
+        if not self.comparison_file_path:
+            messagebox.showerror("Error", "Please upload an Excel file for comparison first.")
+            self.status_label.config(text="No Excel file loaded.", fg="#D32F2F")
+            return
+        links = self.links_text.get("1.0", tk.END).strip().split('\n')
+        proxy = self.proxy_entry.get().strip() or None
+        if not any(link.strip() for link in links):
+            messagebox.showwarning("Warning", "Please enter at least one valid link!")
+            self.status_label.config(text="No links provided.", fg="#D32F2F")
+            return
+        try:
+            df_old = pd.read_excel(self.comparison_file_path)
+            threading.Thread(target=self.process_urls, args=(links, df_old, proxy), daemon=True).start()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load comparison Excel: {str(e)}")
+            self.status_label.config(text="Error loading file.", fg="#D32F2F")
+
+    def process_urls(self, links, df_old=None, proxy=None):
+        """Processes URLs for scraping or comparison."""
+        self.results_data = []
+        self.result_text.config(state=tk.NORMAL)
+        self.result_text.delete("1.0", tk.END)
+        self.result_text.insert(tk.END, "Results:\n")
+        self.result_text.config(state=tk.DISABLED)
+        total_links = len([link for link in links if link.strip()])
+        if total_links == 0:
+            self.log_message("No valid links provided.")
+            self.status_label.config(text="No valid links.", fg="#D32F2F")
+            self.progress_bar.stop()
+            return
+
+        self.log_message(f"Processing {total_links} URLs...")
+        results = []
+        changes_list = []
+        for i, link in enumerate(links):
+            if not link.strip():
+                continue
+            self.log_message(f"Checking URL {i+1}/{total_links}: {link}")
+            result = self.fetch_product_info(link.strip(), proxy)
+            results.append(result)
+            if df_old is not None:
+                change = ""
+                match = df_old[df_old['Link'] == link]
+                if not match.empty:
+                    row = match.iloc[0]
+                    if result['Member Price'] != row['Member Price']:
+                        change += f"Price changed from {row['Member Price']} to {result['Member Price']}. "
+                    if result['Stock'] != row['Stock']:
+                        change += f"Stock changed from {row['Stock']} to {result['Stock']}."
+                    changes_list.append(change.strip() or "No changes")
+                    result['Old Price'] = row['Member Price']
+                    result['Old Stock'] = row['Stock']
+                else:
+                    changes_list.append("No comparison data found")
+                    result['Old Price'] = "N/A"
+                    result['Old Stock'] = "N/A"
+            self.results_data.append(result)
+            self.progress_bar['value'] = (i + 1) / total_links * 100
+            time.sleep(0.5)  # Respectful delay
+            self.master.update_idletasks()
+
+        self.display_results(results, changes_list if df_old is not None else None)
+        self.status_label.config(text="Processing complete!", fg="#4CAF50")
+        self.progress_bar.stop()
+        self.progress_bar['value'] = 0
+        self.save_button.config(state=tk.NORMAL)
+
+    def upload_excel_file(self):
+        """Uploads an Excel file for comparison."""
+        file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        if file_path:
+            self.comparison_file_path = file_path
+            self.log_message(f"Excel file loaded: {file_path}")
+            try:
+                df = pd.read_excel(file_path)
+                if 'Link' not in df.columns:
+                    messagebox.showerror("Error", "Excel file must contain a 'Link' column.")
+                    self.log_message("Invalid Excel format: Missing 'Link' column.")
+                    self.comparison_file_path = None
+                    return
+                urls = df['Link'].dropna().tolist()
+                self.links_text.delete("1.0", tk.END)
+                self.links_text.insert(tk.END, '\n'.join(urls))
+                self.compare_button.config(state=tk.NORMAL)
+                self.check_button.config(state=tk.DISABLED)
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load Excel: {str(e)}")
+                self.log_message(f"Error loading Excel: {str(e)}")
+                self.comparison_file_path = None
+                self.compare_button.config(state=tk.DISABLED)
+                self.check_button.config(state=tk.NORMAL)
+        else:
+            self.comparison_file_path = None
+            self.compare_button.config(state=tk.DISABLED)
+            self.check_button.config(state=tk.NORMAL)
+        self.master.update_idletasks()
+
+    def save_to_xls(self):
+        """Saves results to an Excel file."""
+        if not self.results_data:
+            messagebox.showwarning("Warning", "No data to save!")
+            self.status_label.config(text="No data to save.", fg="#D32F2F")
+            return
+        file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        if file_path:
+            try:
+                df = pd.DataFrame(self.results_data)
+                df.to_excel(file_path, index=False)
+                messagebox.showinfo("Info", "Saved successfully!")
+                self.status_label.config(text="Data saved to Excel.", fg="#4CAF50")
+                self.log_message(f"Results saved to: {file_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save Excel: {str(e)}")
+                self.status_label.config(text="Error saving file.", fg="#D32F2F")
+                self.log_message(f"Error saving Excel: {str(e)}")
+
+    def toggle_theme(self):
+        """Toggles between light and dark themes."""
+        if self.current_theme == "light":
+            self.current_theme = "dark"
+            bg, fg = "#263238", "#FFFFFF"
+            frame_bg = "#263238"
+            widget_bg = "#37474F"
+            button_bg = "#546E7A"
+            text_fg = "#FFFFFF"
+        else:
+            self.current_theme = "light"
+            bg, fg = "#ECEFF1", "#37474F"
+            frame_bg = "#ECEFF1"
+            widget_bg = "#FFFFFF"
+            button_bg = "#B0BEC5"
+            text_fg = "#212121"
+
+        self.master.configure(bg=bg)
+        self.input_frame.configure(bg=widget_bg)
+        self.button_frame.configure(bg=frame_bg)
+        self.status_frame.configure(bg=frame_bg)
+        self.log_results_frame.configure(bg=frame_bg)
+        self.save_button_frame.configure(bg=frame_bg)
+        self.vpn_status_label.configure(bg=frame_bg, fg="#B0BEC5" if self.current_theme == "dark" else "#546E7A")
+        self.status_label.configure(bg=frame_bg, fg="#B0BEC5" if self.current_theme == "dark" else "#546E7A")
+        self.proxy_entry.configure(bg=widget_bg, fg=text_fg, insertbackground=text_fg)
+        self.links_text.configure(bg=widget_bg, fg=text_fg, insertbackground=text_fg)
+        self.log_pane.configure(bg=widget_bg, fg=text_fg)
+        self.result_text.configure(bg=widget_bg, fg=text_fg)
+        self.theme_button.configure(text=f"Switch to {'Light' if self.current_theme == 'dark' else 'Dark'} Theme", bg=button_bg)
+        for widget in self.input_frame.winfo_children() + self.button_frame.winfo_children():
+            if isinstance(widget, tk.Label):
+                widget.configure(bg=widget_bg if widget in self.input_frame.winfo_children() else frame_bg, fg=fg)
+
+# Main
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SportsmansGuideScraperApp(root)
+    root.mainloop()
